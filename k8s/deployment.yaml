@@ -10,7 +10,7 @@ spec:
     - ReadWriteOnce
   resources:
     requests:
-      storage: 5Gi # Reserva 5GB para la base de datos
+      storage: 5Gi
 
 ---
 
@@ -24,7 +24,10 @@ metadata:
   labels:
     app: siaugesmat-db
 spec:
-  replicas: 1 # Las bases de datos SQL no se escalan fácilmente aumentando réplicas
+  replicas: 1
+  # CRÍTICO: Evita bloqueos del disco ReadWriteOnce durante actualizaciones
+  strategy:
+    type: Recreate 
   selector:
     matchLabels:
       app: siaugesmat-db
@@ -39,7 +42,6 @@ spec:
           ports:
             - containerPort: 5432
           env:
-            # En K8s, las contraseñas se leen de un objeto "Secret" (ver instrucciones abajo)
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef:
@@ -102,7 +104,7 @@ metadata:
   labels:
     app: siaugesmat-web
 spec:
-  replicas: 2 # ¡AQUÍ ESTÁ LA ALTA DISPONIBILIDAD! Si uno falla, queda el otro.
+  replicas: 2
   selector:
     matchLabels:
       app: siaugesmat-web
@@ -113,14 +115,22 @@ spec:
     spec:
       containers:
         - name: web
-          # -----------------------------------------------------------
-          # IMPORTANTE: CAMBIA ESTO POR TU IMAGEN REAL EN DOCKER HUB
-          # -----------------------------------------------------------
           image: tu-usuario/siaugesmat:v1 
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:
+            # Variables de Arranque (start.sh)
+            - name: CONTAINER_ROLE
+              value: "web"
+            - name: DB_HOST
+              value: "siaugesmat-db-service"
+            - name: DB_PORT
+              value: "5432"
+            - name: REDIS_HOST
+              value: "siaugesmat-redis-service"
+              
+            # Variables de Aplicación
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -142,7 +152,6 @@ spec:
                 secretKeyRef:
                   name: siaugesmat-secrets
                   key: SECRET_KEY
-          # Health Check: K8s revisará si la app responde. Si no, la reinicia.
           livenessProbe:
             httpGet:
               path: /health
@@ -162,7 +171,7 @@ metadata:
   labels:
     app: siaugesmat-worker
 spec:
-  replicas: 1 # Puedes subir esto a 2 o 3 si hay muchos Excels a la vez
+  replicas: 1
   selector:
     matchLabels:
       app: siaugesmat-worker
@@ -173,9 +182,20 @@ spec:
     spec:
       containers:
         - name: worker
-          image: tu-usuario/siaugesmat:v1 # Misma imagen que la web
-          command: ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=info"]
+          image: tu-usuario/siaugesmat:v1
+          # ELIMINADO: command: ["celery"...] (El start.sh lo maneja)
           env:
+            # Variables de Arranque (start.sh)
+            - name: CONTAINER_ROLE
+              value: "worker"
+            - name: DB_HOST
+              value: "siaugesmat-db-service"
+            - name: DB_PORT
+              value: "5432"
+            - name: REDIS_HOST
+              value: "siaugesmat-redis-service"
+
+            # Variables de Aplicación
             - name: DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -192,3 +212,18 @@ spec:
                 secretKeyRef:
                   name: siaugesmat-secrets
                   key: MOODLE_API_TOKEN
+                  
+          # CRÍTICO: livenessProbe para evitar workers zombies
+          livenessProbe:
+            exec:
+              command:
+                - celery
+                - -A
+                - app.core.celery_app
+                - inspect
+                - ping
+                - -d
+                - celery@$HOSTNAME
+            initialDelaySeconds: 30
+            periodSeconds: 60
+            timeoutSeconds: 10

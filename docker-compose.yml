@@ -9,7 +9,13 @@ services:
     ports:
       - "8080:8080"
     environment:
-      # Construye la URL de conexión usando las variables del .env
+      # Variables críticas para el Entrypoint (start.sh)
+      - CONTAINER_ROLE=web
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+      
+      # Variables de la Aplicación
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -19,18 +25,24 @@ services:
     depends_on:
       - db
       - redis
-    # Opcional: Para que veas cambios en tu código sin reiniciar
+    # Montaje corregido para coincidir con el COPY . . del Dockerfile
     volumes:
-      - ./app:/app/app
+      - ./:/app
 
   # 2. Worker de Celery (Procesa el Excel en segundo plano)
   worker:
     build: 
       context: .
       dockerfile: docker/Dockerfile
-    command: celery -A app.core.celery_app worker --loglevel=info
+    # ELIMINADO: command: celery ... (Ahora el control lo tiene start.sh)
     environment:
-      # Misma URL de base de datos dinámica
+      # Variables críticas para el Entrypoint (start.sh)
+      - CONTAINER_ROLE=worker
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_HOST=redis
+
+      # Variables de la Aplicación
       - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db/${POSTGRES_DB}
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
@@ -40,7 +52,7 @@ services:
       - redis
       - db
     volumes:
-      - ./app:/app/app
+      - ./:/app
 
   # 3. Base de Datos (Diario de Operaciones)
   db:
@@ -48,7 +60,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     environment:
-      # Aquí lee las credenciales que definiste en el .env
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
       - POSTGRES_DB=${POSTGRES_DB}

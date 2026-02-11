@@ -34,19 +34,20 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip setuptools wheel && \
     pip install --no-cache-dir -r requirements.txt
 
-# 6. Copia del código fuente
-# Copiamos el resto de la aplicación
-COPY . .
+# 6. Configuración de Seguridad (Usuario No-Root)
+# CRÍTICO: Creamos el usuario ANTES de copiar el código para optimizar las capas
+RUN useradd -m -s /bin/bash siauser
 
-# 7. Preparación del script de arranque y Permisos
-# Ajustamos los permisos del script y aseguramos el formato de línea Unix (LF)
-RUN chmod +x app/docker/start.sh && \
-    sed -i 's/\r$//' app/docker/start.sh
+# 7. Copia del código fuente
+# CRÍTICO: Copiamos asignando inmediatamente la propiedad al usuario no-root.
+# Esto evita crear una capa duplicada pesada que genera el comando 'chown' por separado.
+COPY --chown=siauser:siauser . .
 
-# 8. Configuración de Seguridad (Usuario No-Root)
-# Creamos un usuario de sistema llamado 'siauser' y le damos propiedad sobre /app
-RUN useradd -m -s /bin/bash siauser && \
-    chown -R siauser:siauser /app
+# 8. Preparación del script de arranque y Permisos
+# CRÍTICO: Ajustamos la ruta a 'docker/start.sh' dado que copiamos el contenido de la raíz.
+# Aseguramos formato Unix (LF) por si el archivo fue editado en Windows.
+RUN chmod +x docker/start.sh && \
+    sed -i 's/\r$//' docker/start.sh
 
 # Cambiamos al usuario seguro. A partir de aquí, nada corre como root.
 USER siauser
@@ -56,4 +57,5 @@ EXPOSE 8080
 
 # 10. Punto de entrada
 # Usamos ENTRYPOINT para que el script reciba las señales del sistema (SIGTERM) correctamente
-ENTRYPOINT ["/app/app/docker/start.sh"]
+# CRÍTICO: Ruta absoluta ajustada al contenedor.
+ENTRYPOINT ["/app/docker/start.sh"]
