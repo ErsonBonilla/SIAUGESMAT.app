@@ -1,101 +1,102 @@
+# app/services/tasks.py
+from celery import Celery
+from app.core.config import settings
+from app.db.session import SessionLocal
+from app.models.models import FileUpload, ProcessingLog
+from app.services.moodle_sync import moodle_client
 import pandas as pd
 import io
 import logging
-from typing import Optional
-from app.core.celery_app import celery_app
-from app.services.moodle_sync import moodle_client
 
-# Configuración del Logger para Celery
+# Configuración de Celery
+celery_app = Celery(
+    "worker",
+    broker=settings.CELERY_BROKER_URL,
+    backend=settings.CELERY_RESULT_BACKEND
+)
+
 logger = logging.getLogger(__name__)
 
-@celery_app.task(bind=True, name="process_moodle_batch")
-def process_moodle_batch(self, csv_content: str, forced_operation: Optional[str] = None):
+@celery_app.task(bind=True)
+def process_moodle_batch(self, file_content: str, forced_operation: str):
     """
-    Tarea asincrónica que procesa un lote de operaciones desde un CSV.
-    Detecta automáticamente el tipo de operación basándose en las columnas,
-    a menos que se fuerce una operación específica.
+    Procesa el CSV en segundo plano.
+    file_content: CSV en formato string.
     """
+    db = SessionLocal()
     try:
-        # Convertir CSV string a DataFrame
-        df = pd.read_csv(io.StringIO(csv_content))
-        total_rows = len(df)
-        logger.info(f"Iniciando procesamiento de {total_rows} registros.")
+        # 1. Crear registro de carga
+        upload_rec = FileUpload(
+            filename="auto_upload.csv", # Podrías pasar el nombre real como argumento
+            operation_type=forced_operation,
+            status="PROCESSING"
+        )
+        db.add(upload_rec)
+        db.commit()
+
+        # 2. Leer datos
+        df = pd.read_csv(io.StringIO(file_content))
+        total = len(df)
+        upload_rec.total_records = total
         
-        results = {
-            "success": 0,
-            "failed": 0,
-            "errors": []
-        }
+        success_count = 0
+        error_count = 0
 
-        # Iterar sobre cada fila del archivo
+        # 3. Iterar y ejecutar contra Moodle
         for index, row in df.iterrows():
+            result = {"success": False, "error": "Operación no soportada"}
+            identifier = "Desconocido"
+
             try:
-                # Actualizar estado de la tarea (para barra de progreso en UI)
-                self.update_state(state='PROGRESS', meta={
-                    'current': index + 1,
-                    'total': total_rows,
-                    'status': f'Procesando fila {index + 1}...'
-                })
-
-                # --- LÓGICA DE DETECCIÓN DE OPERACIÓN ---
+                # Mapeo de operaciones
+                if forced_operation == "CREATE_USER":
+                    identifier = row.get('username', 'N/A')
+                    result = moodle_client.create_user(row.to_dict())
                 
-                # 1. ELIMINAR CURSO (Columna 'delete' y 'shortname')
-                if 'delete' in row and 'shortname' in row and row['delete'] == 1:
-                    # MoodleClient necesita un método delete_course (agregarlo si falta)
-                    # moodle_client.delete_course(row['shortname'])
-                    logger.info(f"Eliminando curso: {row['shortname']}")
+                elif forced_operation == "ENROLL_USER":
+                    identifier = f"{row.get('username')} -> {row.get('shortname')}"
+                    result = moodle_client.enroll_user(row.to_dict())
                 
-                # 2. ELIMINAR USUARIO (Columna 'delete' y 'username')
-                elif 'delete' in row and 'username' in row and row['delete'] == 1:
-                    # moodle_client.delete_user(row['username'])
-                    logger.info(f"Eliminando usuario: {row['username']}")
+                elif forced_operation == "CREATE_COURSE":
+                    identifier = row.get('shortname', 'N/A')
+                    result = moodle_client.create_course(row.to_dict())
 
-                # 3. CAMBIAR VISIBILIDAD (Columna 'visible' y 'shortname')
-                elif 'visible' in row and 'shortname' in row:
-                    moodle_client.update_course_visibility(
-                        shortname=row['shortname'], 
-                        visible=int(row['visible'])
-                    )
+                # Registro de Log
+                status = "SUCCESS" if result.get('success') else "ERROR"
+                msg = str(result.get('data') if result.get('success') else result.get('error'))
 
-                # 4. MATRICULAR USUARIO (Columnas 'username', 'role1', 'shortname' o 'course1')
-                # Nota: 'course1' es estándar en CSV Moodle, pero nuestro procesador usa 'shortname'
-                elif 'username' in row and ('shortname' in row or 'course1' in row):
-                    course_ref = row.get('shortname', row.get('course1'))
-                    role_ref = row.get('role1', 'student')
-                    
-                    moodle_client.enroll_user(
-                        shortname_course=course_ref,
-                        username=row['username'],
-                        role_shortname=role_ref
-                    )
+                log = ProcessingLog(
+                    upload_id=upload_rec.id,
+                    identifier=identifier,
+                    action=forced_operation,
+                    status=status,
+                    message=msg
+                )
+                db.add(log)
 
-                # 5. CREAR CURSO (Default si tiene 'fullname' y 'shortname')
-                elif 'fullname' in row and 'shortname' in row:
-                    # Convertir la fila a diccionario para pasarla al cliente
-                    course_data = row.to_dict()
-                    moodle_client.create_course(course_data)
-
+                if status == "SUCCESS":
+                    success_count += 1
                 else:
-                    logger.warning(f"Fila {index}: No se pudo determinar la operación.")
-                    results["failed"] += 1
-                    continue
-
-                results["success"] += 1
+                    error_count += 1
 
             except Exception as e:
-                logger.error(f"Error en fila {index}: {str(e)}")
-                results["failed"] += 1
-                results["errors"].append(f"Fila {index}: {str(e)}")
+                error_count += 1
+                logger.error(f"Error en fila {index}: {e}")
         
-        # Resultado final
-        return {
-            "status": "COMPLETED",
-            "processed": total_rows,
-            "success": results["success"],
-            "failed": results["failed"],
-            "errors": results["errors"]  # Opcional: devolver errores detallados
-        }
+        # 4. Actualizar estado final
+        upload_rec.status = "COMPLETED"
+        upload_rec.success_count = success_count
+        upload_rec.error_count = error_count
+        db.commit()
+        
+        return {"status": "completed", "processed": total}
 
     except Exception as e:
-        logger.critical(f"Error fatal procesando el lote: {str(e)}")
-        return {"status": "FAILED", "error": str(e)}
+        db.rollback()
+        logger.error(f"Error fatal en tarea: {e}")
+        if 'upload_rec' in locals():
+            upload_rec.status = "FAILED"
+            db.commit()
+        raise e
+    finally:
+        db.close()
