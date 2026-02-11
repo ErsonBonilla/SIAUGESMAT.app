@@ -9,8 +9,12 @@ logger = logging.getLogger(__name__)
 class MoodleClient:
     """
     Cliente para interactuar con la API REST de Moodle (Web Services).
-    Implementa lógica de negocio específica para la Universidad del Tolima (Moodle 3.9+).
-    Incluye: Gestión de Usuarios, Cursos, Matriculación y Visibilidad.
+    
+    Características:
+    - Moodle 3.9+ Compatible.
+    - Manejo de Usuarios, Cursos, Matriculaciones.
+    - Soporte para 'Template Courses' mediante importación diferida.
+    - Validaciones de seguridad (contraseñas, categorías existentes).
     """
 
     def __init__(self):
@@ -31,13 +35,13 @@ class MoodleClient:
         payload.update(params)
 
         try:
-            # Timeout de 30s para evitar bloqueos en cargas masivas
+            # Timeout de 30s para evitar bloqueos en operaciones pesadas (como importación)
             response = requests.post(self.api_url, data=payload, timeout=30)
             response.raise_for_status() 
             
             data = response.json()
 
-            # Detección de errores lógicos devueltos por Moodle (Exception handling)
+            # Detección de errores lógicos devueltos por Moodle
             if isinstance(data, dict) and ("exception" in data or "debuginfo" in data):
                 error_msg = data.get("message", "Error desconocido de Moodle")
                 error_code = data.get("errorcode", "")
@@ -73,7 +77,7 @@ class MoodleClient:
         """
         password = str(user_data.get("password", ""))
 
-        # Validación local de seguridad
+        # Validación local de seguridad (PDF Req: evitar contraseñas débiles)
         if len(password) < 8:
             return {"success": False, "error": "Contraseña insegura: Mínimo 8 caracteres requeridos."}
 
@@ -92,33 +96,26 @@ class MoodleClient:
 
         result = self._send_request("core_user_create_users", params)
 
-        # Interpretación de errores comunes
         if not result["success"]:
             err_msg = result.get("error", "").lower()
             if "password" in err_msg and "policy" in err_msg:
-                return {"success": False, "error": "La contraseña no cumple la política de seguridad (Mayús, Minús, Núm, Caracter esp)."}
+                return {"success": False, "error": "La contraseña no cumple políticas (Mayús, Minús, Núm, Caracter esp)."}
             if "username" in err_msg and "already exists" in err_msg:
                 return {"success": False, "error": "El usuario ya existe."}
 
         return result
 
     def delete_user(self, username: str) -> Dict[str, Any]:
-        """
-        Elimina un usuario del sistema.
-        Requerido por PDF .
-        """
+        """Elimina un usuario del sistema."""
         user_id = self.get_user_id_by_username(username)
         if not user_id:
-            return {"success": False, "error": f"Usuario '{username}' no encontrado, no se puede eliminar."}
+            return {"success": False, "error": f"Usuario '{username}' no encontrado."}
 
         params = {"userids[0]": user_id}
-        
-        # core_user_delete_users devuelve null en éxito o excepción en error
         result = self._send_request("core_user_delete_users", params)
         
         if result["success"] and result["data"] is None:
              return {"success": True, "data": f"Usuario '{username}' eliminado correctamente."}
-        
         return result
 
     # =========================================================================
@@ -145,14 +142,14 @@ class MoodleClient:
     def create_course(self, course_data: Dict[str, Any]) -> Dict[str, Any]:
         """
         Crea un curso nuevo validando la categoría primero.
+        NOTA: No procesa 'templatecourse' aquí, eso se hace en import_course_content.
         """
         try:
-            # Si category_id no viene, intentamos usar 'category' (nombre común en CSVs)
-            cat_raw = course_data.get("category_id") or course_data.get("category")
-            category_id = int(cat_raw or 0)
+            category_id = int(course_data.get("category_id") or 0)
         except ValueError:
-            return {"success": False, "error": "El ID de categoría debe ser un número entero."}
+            return {"success": False, "error": "El ID de categoría debe ser numérico."}
 
+        # Validación Problema 4 (IDs inexistentes)
         if not self.check_category_exists(category_id):
             return {"success": False, "error": f"La categoría ID {category_id} no existe."}
 
@@ -164,18 +161,42 @@ class MoodleClient:
             "courses[0][format]": course_data.get("format", "topics"),
         }
         
-        # Mapeo opcional de IDNUMBER si fue generado
         if "category_idnumber" in course_data:
              params["courses[0][idnumber]"] = course_data["category_idnumber"]
 
         return self._send_request("core_course_create_courses", params)
 
+    def import_course_content(self, target_course_id: int, template_shortname: str) -> Dict[str, Any]:
+        """
+        NUEVO: Simula la funcionalidad 'templatecourse'.
+        Importa contenido de una plantilla al curso destino.
+        API: core_course_import_course
+        """
+        # 1. Obtener ID de la plantilla
+        template_id = self.get_course_id_by_shortname(template_shortname)
+        if not template_id:
+            return {
+                "success": False, 
+                "error": f"Plantilla '{template_shortname}' no encontrada. Curso creado vacío."
+            }
+
+        # 2. Ejecutar importación
+        params = {
+            "importfrom": template_id,
+            "importto": target_course_id,
+            "deletecontent": 0  # 0 = No borrar (merge), 1 = Borrar destino antes
+        }
+
+        result = self._send_request("core_course_import_course", params)
+
+        if result["success"]:
+            # La API suele devolver null o vacio en éxito de importación
+            return {"success": True, "data": f"Contenido importado desde '{template_shortname}'."}
+        
+        return result
+
     def update_course_visibility(self, shortname: str, visible: int) -> Dict[str, Any]:
-        """
-        Actualiza la visibilidad de un curso.
-        Requerido por PDF .
-        visible: 1 (Mostrar), 0 (Ocultar).
-        """
+        """Actualiza visibilidad (1=Ver, 0=Ocultar)."""
         course_id = self.get_course_id_by_shortname(shortname)
         if not course_id:
             return {"success": False, "error": f"Curso '{shortname}' no encontrado."}
@@ -184,37 +205,16 @@ class MoodleClient:
             "courses[0][id]": course_id,
             "courses[0][visible]": int(visible)
         }
-        
-        result = self._send_request("core_course_update_courses", params)
-        
-        # Moodle suele devolver advertencias en warnings si algo no fue perfecto, pero success=True
-        if result["success"]:
-             return {"success": True, "data": f"Visibilidad del curso actualizada a {visible}."}
-        return result
+        return self._send_request("core_course_update_courses", params)
 
     def delete_course(self, shortname: str) -> Dict[str, Any]:
-        """
-        Elimina un curso permanentemente.
-        Requerido por PDF .
-        """
+        """Elimina un curso permanentemente."""
         course_id = self.get_course_id_by_shortname(shortname)
         if not course_id:
-            return {"success": False, "error": f"Curso '{shortname}' no encontrado, no se puede eliminar."}
+            return {"success": False, "error": f"Curso '{shortname}' no encontrado."}
 
         params = {"courseids[0]": course_id}
-        
-        # core_course_delete_courses no devuelve contenido en éxito, solo warnings si los hay
-        result = self._send_request("core_course_delete_courses", params)
-        
-        if result["success"]:
-             # Verificar si hubo warnings (ej: curso no pudo borrarse por matriculas activas, aunque es raro con delete_courses)
-             warnings = result.get("data", {}).get("warnings", [])
-             if warnings:
-                 return {"success": False, "error": f"Advertencia Moodle: {warnings[0].get('message')}"}
-             
-             return {"success": True, "data": f"Curso '{shortname}' eliminado correctamente."}
-        
-        return result
+        return self._send_request("core_course_delete_courses", params)
 
     # =========================================================================
     # 3. MATRICULACIÓN
@@ -222,30 +222,20 @@ class MoodleClient:
 
     def enroll_user(self, enrollment_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Matricula un usuario en un curso resolviendo IDs.
+        Matricula usuario resolviendo IDs y Roles.
         """
         username = enrollment_data.get("username")
         shortname = enrollment_data.get("shortname")
         
-        # Mapeo de Roles según PDF (editingteacher=3, student=5)
-        # Si viene el nombre del rol (ej: 'student'), lo convertimos a ID
+        # Mapeo de Roles (fallback a student si falla)
         role_input = enrollment_data.get("role", "student")
         role_map = {
-            "manager": 1,
-            "coursecreator": 2,
-            "editingteacher": 3,
-            "teacher": 4,
-            "student": 5,
-            "guest": 6
+            "manager": 1, "coursecreator": 2, "editingteacher": 3,
+            "teacher": 4, "student": 5, "guest": 6
         }
         
-        # Si es un dígito lo usamos, si es string buscamos en el mapa
-        if str(role_input).isdigit():
-            role_id = int(role_input)
-        else:
-            role_id = role_map.get(str(role_input).lower(), 5) # Default Student
+        role_id = role_map.get(str(role_input).lower(), 5) 
 
-        # Resolver IDs
         user_id = self.get_user_id_by_username(username)
         if not user_id:
             return {"success": False, "error": f"Usuario '{username}' no encontrado."}
