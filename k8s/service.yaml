@@ -1,0 +1,57 @@
+# ---------------------------------------------------------
+# SERVICIO 1: APLICACIÓN WEB (NiceGUI + FastAPI)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: siaugesmat-web-service
+  labels:
+    app: siaugesmat-web
+spec:
+  # ClusterIP es el estándar. Significa que tiene una IP interna.
+  # Para salir a internet, usaremos un "Ingress" más adelante.
+  type: ClusterIP
+  selector:
+    # IMPORTANTE: Esto debe coincidir con el 'label' en tu deployment.yaml
+    app: siaugesmat-web
+  ports:
+    - protocol: TCP
+      port: 80            # Puerto "virtual" del servicio
+      targetPort: 8080    # Puerto real donde escucha tu contenedor Python
+      name: http
+
+---
+
+# ---------------------------------------------------------
+# SERVICIO 2: REDIS (Comunicación Interna)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: siaugesmat-redis-service
+spec:
+  type: ClusterIP
+  selector:
+    app: siaugesmat-redis
+  ports:
+    - protocol: TCP
+      port: 6379          # Puerto estándar de Redis
+      targetPort: 6379
+
+---
+
+# ---------------------------------------------------------
+# SERVICIO 3: BASE DE DATOS (PostgreSQL 18)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: Service
+metadata:
+  name: siaugesmat-db-service
+spec:
+  type: ClusterIP
+  selector:
+    app: siaugesmat-db
+  ports:
+    - protocol: TCP
+      port: 5432          # Puerto estándar de Postgres
+      targetPort: 5432

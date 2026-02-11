@@ -1,0 +1,194 @@
+# ---------------------------------------------------------
+# 1. VOLUMEN PERSISTENTE (Disco Duro para la Base de Datos)
+# ---------------------------------------------------------
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-pvc
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 5Gi # Reserva 5GB para la base de datos
+
+---
+
+# ---------------------------------------------------------
+# 2. BASE DE DATOS (PostgreSQL 18)
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: siaugesmat-db
+  labels:
+    app: siaugesmat-db
+spec:
+  replicas: 1 # Las bases de datos SQL no se escalan fácilmente aumentando réplicas
+  selector:
+    matchLabels:
+      app: siaugesmat-db
+  template:
+    metadata:
+      labels:
+        app: siaugesmat-db
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:18-alpine
+          ports:
+            - containerPort: 5432
+          env:
+            # En K8s, las contraseñas se leen de un objeto "Secret" (ver instrucciones abajo)
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: POSTGRES_USER
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: POSTGRES_PASSWORD
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: POSTGRES_DB
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-storage
+      volumes:
+        - name: postgres-storage
+          persistentVolumeClaim:
+            claimName: postgres-pvc
+
+---
+
+# ---------------------------------------------------------
+# 3. REDIS (Cache / Broker)
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: siaugesmat-redis
+  labels:
+    app: siaugesmat-redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: siaugesmat-redis
+  template:
+    metadata:
+      labels:
+        app: siaugesmat-redis
+    spec:
+      containers:
+        - name: redis
+          image: redis:7-alpine
+          ports:
+            - containerPort: 6379
+
+---
+
+# ---------------------------------------------------------
+# 4. APLICACIÓN WEB (Alta Disponibilidad)
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: siaugesmat-web
+  labels:
+    app: siaugesmat-web
+spec:
+  replicas: 2 # ¡AQUÍ ESTÁ LA ALTA DISPONIBILIDAD! Si uno falla, queda el otro.
+  selector:
+    matchLabels:
+      app: siaugesmat-web
+  template:
+    metadata:
+      labels:
+        app: siaugesmat-web
+    spec:
+      containers:
+        - name: web
+          # -----------------------------------------------------------
+          # IMPORTANTE: CAMBIA ESTO POR TU IMAGEN REAL EN DOCKER HUB
+          # -----------------------------------------------------------
+          image: tu-usuario/siaugesmat:v1 
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8080
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: DATABASE_URL
+            - name: CELERY_BROKER_URL
+              value: "redis://siaugesmat-redis-service:6379/0"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://siaugesmat-redis-service:6379/0"
+            - name: MOODLE_API_URL
+              value: "https://tuaulavirtual.ut.edu.co/webservice/rest/server.php"
+            - name: MOODLE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: MOODLE_API_TOKEN
+            - name: SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: SECRET_KEY
+          # Health Check: K8s revisará si la app responde. Si no, la reinicia.
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 20
+
+---
+
+# ---------------------------------------------------------
+# 5. WORKER DE CELERY (Procesamiento en Segundo Plano)
+# ---------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: siaugesmat-worker
+  labels:
+    app: siaugesmat-worker
+spec:
+  replicas: 1 # Puedes subir esto a 2 o 3 si hay muchos Excels a la vez
+  selector:
+    matchLabels:
+      app: siaugesmat-worker
+  template:
+    metadata:
+      labels:
+        app: siaugesmat-worker
+    spec:
+      containers:
+        - name: worker
+          image: tu-usuario/siaugesmat:v1 # Misma imagen que la web
+          command: ["celery", "-A", "app.core.celery_app", "worker", "--loglevel=info"]
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: DATABASE_URL
+            - name: CELERY_BROKER_URL
+              value: "redis://siaugesmat-redis-service:6379/0"
+            - name: CELERY_RESULT_BACKEND
+              value: "redis://siaugesmat-redis-service:6379/0"
+            - name: MOODLE_API_URL
+              value: "https://tuaulavirtual.ut.edu.co/webservice/rest/server.php"
+            - name: MOODLE_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: siaugesmat-secrets
+                  key: MOODLE_API_TOKEN

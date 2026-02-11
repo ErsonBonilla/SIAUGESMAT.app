@@ -1,0 +1,42 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: siaugesmat-ingress
+  annotations:
+    # Definimos que usaremos Nginx como controlador (estándar en la mayoría de clústeres)
+    kubernetes.io/ingress.class: nginx
+    
+    # --- CRÍTICO PARA TU PROYECTO ---
+    # Por defecto, Nginx bloquea subidas mayores a 1MB.
+    # Como vas a subir archivos Excel grandes con matrículas,
+    # ampliamos el límite a 50MB (o "0" para ilimitado).
+    nginx.ingress.kubernetes.io/proxy-body-size: "50m"
+    
+    # Aumentamos el tiempo de espera por si el servidor tarda en responder
+    # al procesar la subida inicial del archivo.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+
+spec:
+  # Configuración de SSL/HTTPS (Recomendado para la UT)
+  # Descomenta esto si tienes un certificado TLS configurado en el clúster
+  # tls:
+  #   - hosts:
+  #       - siaugesmat.ut.edu.co
+  #     secretName: siaugesmat-tls-secret
+
+  rules:
+    # 1. EL DOMINIO
+    # Cambia "siaugesmat.ut.edu.co" por el dominio real que te asigne la universidad via DNS.
+    # Si estás probando en local (Minikube), puedes usar "localhost" o editar tu archivo /etc/hosts
+    - host: siaugesmat.ut.edu.co
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                # Debe coincidir EXACTAMENTE con el nombre en service.yaml
+                name: siaugesmat-web-service
+                port:
+                  number: 80

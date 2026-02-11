@@ -1,0 +1,26 @@
+# --- Framework Core ---
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
+nicegui==1.4.12
+
+# --- Procesamiento de Datos ---
+pandas==2.2.0
+openpyxl==3.1.2
+xlrd==2.0.1
+
+# --- Base de Datos y Modelos ---
+sqlalchemy==2.0.25
+psycopg2-binary==2.9.9
+pydantic-settings==2.1.0
+
+# --- Tareas Asíncronas (Worker) ---
+celery==5.3.6
+redis==5.0.1
+
+# --- API y Visualización ---
+requests==2.31.0
+plotly==5.18.0
+
+# --- Utilidades ---
+python-multipart==0.0.6
+python-dotenv==1.0.1
